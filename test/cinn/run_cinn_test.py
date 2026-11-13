@@ -133,8 +133,10 @@ def timed_loop(step_fn, total_iters, mode, stage):
         paddle.device.synchronize()
         times.append(time.perf_counter() - start)
         values.append(value)
+        loss_text = f" loss {value:.8g}" if stage == "train" else ""
         print(
-            f"[{mode}/{stage}] iter {step + 1}/{total_iters} time {times[-1]:.5f}s",
+            f"[{mode}/{stage}] iter {step + 1}/{total_iters}"
+            f" time {times[-1]:.5f}s{loss_text}",
             flush=True,
         )
     return times, values
@@ -323,6 +325,104 @@ def rel_diff(a, b):
     return abs(a - b) / max(abs(a), 1e-12)
 
 
+def train_window_stats(ref, out, start_step, end_step, step_rtol):
+    """Compare losses over the inclusive 1-based [start_step, end_step] range."""
+    if len(ref) != len(out):
+        raise ValueError(f"loss count differs: {len(ref)} vs {len(out)}")
+    if start_step < 1 or end_step < start_step or end_step > len(ref):
+        raise ValueError(
+            f"invalid train loss window {start_step}-{end_step} for {len(ref)} steps"
+        )
+    ref_window = ref[start_step - 1 : end_step]
+    out_window = out[start_step - 1 : end_step]
+    diffs = [rel_diff(a, b) for a, b in zip(ref_window, out_window)]
+    abs_diffs = [abs(a - b) for a, b in zip(ref_window, out_window)]
+    return {
+        "dynamic_loss_mean": statistics.mean(ref_window),
+        "cinn_loss_mean": statistics.mean(out_window),
+        "loss_rel_diff_exceed_count": sum(diff > step_rtol for diff in diffs),
+        "loss_abs_diff_exceed_count": sum(diff > step_rtol for diff in abs_diffs),
+    }
+
+
+def plot_train_loss_comparison(work_dir, case_name, ref, out, args):
+    """Save loss and error comparisons for the configured step window."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    steps = np.arange(1, len(ref) + 1)
+    window = slice(args.train_window_start - 1, args.train_window_end)
+    window_steps = steps[window]
+    dynamic_mean = statistics.mean(ref[window])
+    cinn_mean = statistics.mean(out[window])
+
+    signed_rel_diffs = [
+        (cinn_loss - dynamic_loss) / max(abs(dynamic_loss), 1e-12)
+        for dynamic_loss, cinn_loss in zip(ref, out)
+    ]
+    signed_diffs = [
+        cinn_loss - dynamic_loss for dynamic_loss, cinn_loss in zip(ref, out)
+    ]
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9.6), constrained_layout=True)
+    axes = axes.flat
+    axes[0].plot(steps, ref, label="Dynamic graph", linewidth=1.2)
+    axes[0].plot(steps, out, label="to_static + CINN", linewidth=1.2)
+    axes[0].set_title("Loss, all training steps")
+    axes[0].set_xlabel("Training step")
+    axes[0].set_ylabel("Loss")
+    axes[0].grid(alpha=0.25)
+    axes[0].legend()
+
+    axes[1].plot(window_steps, ref[window], label="Dynamic graph", linewidth=1.2)
+    axes[1].plot(window_steps, out[window], label="to_static + CINN", linewidth=1.2)
+    axes[1].set_title(
+        f"Loss, steps {args.train_window_start}-{args.train_window_end}"
+    )
+    axes[1].set_xlabel("Training step")
+    axes[1].set_ylabel("Loss")
+    axes[1].grid(alpha=0.25)
+    axes[1].legend()
+
+    axes[2].plot(
+        window_steps,
+        signed_rel_diffs[window],
+        label="(CINN - dynamic) / |dynamic|",
+        linewidth=1.2,
+    )
+    for threshold in (args.train_step_rtol, -args.train_step_rtol):
+        axes[2].axhline(threshold, color="tab:red", linestyle="--")
+    axes[2].set_title("Signed relative loss difference")
+    axes[2].set_xlabel("Training step")
+    axes[2].set_ylabel("Relative difference")
+    axes[2].set_yscale("symlog", linthresh=args.train_step_rtol)
+    axes[2].grid(alpha=0.25)
+    axes[2].legend()
+
+    axes[3].plot(
+        window_steps,
+        signed_diffs[window],
+        label="CINN - dynamic",
+        linewidth=1.2,
+    )
+    for threshold in (args.train_step_rtol, -args.train_step_rtol):
+        axes[3].axhline(threshold, color="tab:red", linestyle="--")
+    axes[3].set_title("Signed loss difference")
+    axes[3].set_xlabel("Training step")
+    axes[3].set_ylabel("Loss difference")
+    axes[3].set_yscale("symlog", linthresh=args.train_step_rtol)
+    axes[3].grid(alpha=0.25)
+    axes[3].legend()
+
+    fig.suptitle(
+        f"{case_name}: window mean loss {dynamic_mean:.6g} / {cinn_mean:.6g} "
+        f"· threshold {args.train_step_rtol:.0e}"
+    )
+    fig.savefig(work_dir / "train_loss_comparison.png", dpi=160)
+    plt.close(fig)
+
+
 def compare_infer(work_dir):
     with np.load(work_dir / "infer_dynamic.npz") as ref, np.load(
         work_dir / "infer_cinn.npz"
@@ -330,17 +430,47 @@ def compare_infer(work_dir):
         if set(ref.files) != set(out.files):
             return {"error": f"output keys differ: {ref.files} vs {out.files}"}
         worst_abs, worst_rel = 0.0, 0.0
+        dynamic_sum, cinn_sum, output_size = 0.0, 0.0, 0
         for key in ref.files:
             a, b = ref[key].astype("float64"), out[key].astype("float64")
             if a.shape != b.shape:
                 return {"error": f"{key} shape {a.shape} vs {b.shape}"}
             if not np.isfinite(b).all() and np.isfinite(a).all():
                 return {"error": f"{key} has non-finite values under CINN"}
+            dynamic_sum += float(a.sum())
+            cinn_sum += float(b.sum())
+            output_size += a.size
             diff = float(np.nanmax(np.abs(a - b))) if a.size else 0.0
             scale = float(np.nanmax(np.abs(a))) if a.size else 0.0
             worst_abs = max(worst_abs, diff)
             worst_rel = max(worst_rel, diff / max(scale, 1e-12))
-    return {"max_abs_diff": worst_abs, "max_rel_diff": worst_rel}
+    return {
+        "max_abs_diff": worst_abs,
+        "max_rel_diff": worst_rel,
+        "dynamic_final_output_mean": dynamic_sum / output_size if output_size else None,
+        "cinn_final_output_mean": cinn_sum / output_size if output_size else None,
+    }
+
+
+def record_infer_means(work_dir, infer):
+    """Add available final-inference means to each worker result JSON."""
+    for mode, mean in (
+        ("dynamic", infer.get("dynamic_final_output_mean")),
+        ("cinn", infer.get("cinn_final_output_mean")),
+    ):
+        if mean is None:
+            continue
+        log_path = work_dir / f"{mode}.log"
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            if line.startswith(RESULT_PREFIX):
+                result = json.loads(line[len(RESULT_PREFIX) :])
+                result["infer"]["final_output_mean"] = mean
+                lines[index] = RESULT_PREFIX + json.dumps(result)
+                break
+        else:
+            raise ValueError(f"worker result missing from {log_path}")
+        log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def compare_case(dynamic, cinn, work_dir, args):
@@ -354,14 +484,27 @@ def compare_case(dynamic, cinn, work_dir, args):
         ref, out = dynamic["train"]["losses"], cinn["train"]["losses"]
         diffs = [rel_diff(a, b) for a, b in zip(ref, out)]
         finite = all(np.isfinite(out)) or not all(np.isfinite(ref))
+        window_stats = train_window_stats(
+            ref,
+            out,
+            args.train_window_start,
+            args.train_window_end,
+            args.train_step_rtol,
+        )
         report["train"] = {
+            "dynamic_mean_loss": window_stats["dynamic_loss_mean"],
+            "cinn_mean_loss": window_stats["cinn_loss_mean"],
             "first_loss_rel_diff": diffs[0],
             "final_loss_rel_diff": diffs[-1],
             "max_loss_rel_diff": max(diffs),
+            "loss_rel_diff_exceed_count": window_stats["loss_rel_diff_exceed_count"],
+            "loss_abs_diff_exceed_count": window_stats["loss_abs_diff_exceed_count"],
             "pass": bool(
                 finite
                 and diffs[0] <= args.train_first_rtol
                 and diffs[-1] <= args.train_final_rtol
+                and window_stats["loss_rel_diff_exceed_count"]
+                < args.train_max_exceed_count
             ),
         }
     for stage in report:
@@ -376,6 +519,15 @@ def compare_case(dynamic, cinn, work_dir, args):
                 "speedup": speedup,
             }
         )
+        if stage == "train":
+            report[stage].update(
+                {
+                    "dynamic_fps": dynamic["batch_size"]
+                    / dynamic[stage]["steady_mean_seconds"],
+                    "cinn_fps": dynamic["batch_size"]
+                    / cinn[stage]["steady_mean_seconds"],
+                }
+            )
     return report
 
 
@@ -394,6 +546,19 @@ def run_case(case_name, args, devices, out_dir):
             summary.update(status="CINN_ERROR", error=error)
             return summary
         summary.update(compare_case(dynamic, cinn, work_dir, args))
+        if "infer" in args.stages:
+            record_infer_means(work_dir, summary["infer"])
+        if "train" in args.stages:
+            try:
+                plot_train_loss_comparison(
+                    work_dir,
+                    case_name,
+                    dynamic["train"]["losses"],
+                    cinn["train"]["losses"],
+                    args,
+                )
+            except Exception as exc:
+                summary["plot_error"] = f"{type(exc).__name__}: {exc}"
         stages = [summary[s] for s in args.stages]
         if not all(s["pass"] for s in stages):
             summary["status"] = "ACC_FAIL"
@@ -410,14 +575,32 @@ def run_case(case_name, args, devices, out_dir):
 def fmt_stage(summary, stage):
     s = summary.get(stage)
     if not s:
-        return ["-", "-", "-"]
+        return ["-"] * (7 if stage == "train" else 4)
     if stage == "infer":
         acc = s.get("error") or f"{s['max_rel_diff']:.1e}"
+        before_acc = [
+            "-"
+            if s.get("dynamic_final_output_mean") is None
+            else f"{s['dynamic_final_output_mean']:.8g}/"
+            f"{s['cinn_final_output_mean']:.8g}"
+        ]
+        count, fps = [], []
     else:
         acc = f"{s['first_loss_rel_diff']:.1e}/{s['final_loss_rel_diff']:.1e}"
+        before_acc = [
+            f"{s['dynamic_mean_loss']:.8g}/{s['cinn_mean_loss']:.8g}",
+        ]
+        count = [
+            str(s["loss_rel_diff_exceed_count"]),
+            str(s["loss_abs_diff_exceed_count"]),
+        ]
+        fps = [f"{s['dynamic_fps']:.2f}/{s['cinn_fps']:.2f}"]
     return [
+        *before_acc,
         acc,
+        *count,
         f"{s['dynamic_seconds'] * 1e3:.2f}/{s['cinn_seconds'] * 1e3:.2f}",
+        *fps,
         f"{s['speedup']:.2f}x",
     ]
 
@@ -425,8 +608,30 @@ def fmt_stage(summary, stage):
 def write_summary(summaries, out_dir, args):
     header = ["case", "status"]
     for stage in args.stages:
-        acc = "infer rel diff" if stage == "infer" else "train loss diff first/final"
+        start = len(header)
+        acc = "infer rel diff" if stage == "infer" else "train loss rel diff first/final"
         header += [acc, f"{stage} ms dyn/cinn", f"{stage} speedup"]
+        if stage == "infer":
+            header.insert(start, "infer final output mean dyn/cinn")
+        else:
+            header.insert(
+                start,
+                (
+                    "train loss mean "
+                    f"(step {args.train_window_start}-{args.train_window_end}) dyn/cinn"
+                ),
+            )
+            header.insert(
+                start + 2,
+                f"train loss rel diff > {args.train_step_rtol:.1e} count "
+                f"(step {args.train_window_start}-{args.train_window_end})",
+            )
+            header.insert(
+                start + 3,
+                f"train loss abs diff > {args.train_step_rtol:.1e} count "
+                f"(step {args.train_window_start}-{args.train_window_end})",
+            )
+            header.insert(start + 5, "train FPS dyn/cinn")
     rows = []
     for s in sorted(summaries, key=lambda x: x["case"]):
         row = [s["case"], s["status"]]
@@ -470,6 +675,30 @@ def parse_args():
     parser.add_argument("--infer-rtol", type=float, default=1e-3)
     parser.add_argument("--train-first-rtol", type=float, default=1e-3)
     parser.add_argument("--train-final-rtol", type=float, default=1e-2)
+    parser.add_argument(
+        "--train-window-start",
+        type=int,
+        default=400,
+        help="inclusive first step used for train-loss accuracy statistics",
+    )
+    parser.add_argument(
+        "--train-window-end",
+        type=int,
+        default=500,
+        help="inclusive last step used for train-loss accuracy statistics",
+    )
+    parser.add_argument(
+        "--train-step-rtol",
+        type=float,
+        default=1e-2,
+        help="per-step relative-error threshold in the train-loss window",
+    )
+    parser.add_argument(
+        "--train-max-exceed-count",
+        type=int,
+        default=10,
+        help="training passes only if the count above --train-step-rtol is below this",
+    )
     parser.add_argument("--output-dir", help="defaults to test/cinn/outputs/<stamp>")
     parser.add_argument(
         "--reuse-inputs",
@@ -504,6 +733,16 @@ def main():
         return
     if args.warmup < 1 or args.iters < 2:
         raise ValueError("need warmup >= 1 and iters >= 2")
+    if args.train_step_rtol <= 0:
+        raise ValueError("--train-step-rtol must be positive")
+    total_iters = args.iters + args.warmup
+    if "train" in args.stages and not (
+        1 <= args.train_window_start <= args.train_window_end <= total_iters
+    ):
+        raise ValueError(
+            f"train loss window must be within 1-{total_iters}, got "
+            f"{args.train_window_start}-{args.train_window_end}"
+        )
 
     available = list_cases()
     cases = available if args.cases == "all" else args.cases.split(",")
