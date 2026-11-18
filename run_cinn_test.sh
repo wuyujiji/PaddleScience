@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-pass_cases="allen_cahn,climateformer,control_arm,deepcfd,deephpms,fsi,gencast,heart,hpinns,ifm,meteoformer,ntopo,preformer,smc_reac,transformer4sr"
-dynamic_error_cases="earthformer,extformer_moe,graphcast,qnm"
-cinn_error_cases="pipe"
-acc_fail_cases="bracket,cnn_uts,darcy,epnn,heat_exchanger,kmcast,perovskite_solar_cells,shock_wave,topopt,xrdmatch"
-train_slower_cases="bubble,mlp_li,operator_learning"
-infer_slower_cases="aneurysm,cylinder,heat_pinn,ldc,nls_mb,nsfnet,phygeonet,regae,xpinn"
+stage1_pass_cases="allen_cahn,climateformer,control_arm,deepcfd,deephpms,fsi,gencast,heart,hpinns,ifm,meteoformer,ntopo,preformer,smc_reac,transformer4sr"
+stage2_pass_cases="bubble,darcy,earthformer,heat_pinn,ldc,phygeonet,pipe,xpinn"
+stage3_pass_cases="graphcast,mlp_li"
+dynamic_error_cases=""
+cinn_error_cases=""
+acc_fail_cases="bracket,cnn_uts,epnn,heat_exchanger,kmcast,perovskite_solar_cells,qnm,shock_wave,topopt,unetformer,xrdmatch"
+train_slower_cases="operator_learning"
+infer_slower_cases="aneurysm,cylinder,nls_mb,nsfnet,regae"
 both_slower_cases="iops"
 
-all_cases="${pass_cases},${dynamic_error_cases},${cinn_error_cases},${acc_fail_cases},${train_slower_cases},${infer_slower_cases},${both_slower_cases}"
+all_cases="${stage1_pass_cases},${stage2_pass_cases},${stage3_pass_cases},${dynamic_error_cases},${cinn_error_cases},${acc_fail_cases},${train_slower_cases},${infer_slower_cases},${both_slower_cases}"
 
-cases_arg="pass"
+cases_arg="stage1_pass"
 warmup=5
 iters=495
 retry=1
@@ -23,9 +25,9 @@ Usage: bash run_cinn_test.sh [options]
 
 Options:
   --cases CASES    Model name, comma-separated model names, or one of:
-                   pass, dynamic_error, cinn_error, acc_fail,
+                   stage1_pass, stage2_pass, stage3_pass, dynamic_error, cinn_error, acc_fail,
                    train_slower, infer_slower, both_slower
-                   (default: pass)
+                   (default: stage1_pass)
   --warmup N       Warmup iterations (default: 5)
   --iters N        Timed iterations (default: 495)
   --retry N        Number of independent runs (default: 1)
@@ -34,6 +36,7 @@ Options:
 
 Examples:
   bash run_cinn_test.sh
+  bash run_cinn_test.sh --cases stage2_pass
   bash run_cinn_test.sh --cases allen_cahn
   bash run_cinn_test.sh --cases allen_cahn,climateformer --retry 2
   bash run_cinn_test.sh --cases acc_fail --warmup 5 --iters 495 --device 0,1,2,3
@@ -114,9 +117,17 @@ fi
 cases_arg="${cases_arg//，/,}"
 cases_arg="${cases_arg// /}"
 case "${cases_arg}" in
-  pass|pass_cases)
-    cases="${pass_cases}"
-    output_name="pass"
+  stage1_pass|stage1_pass_cases)
+    cases="${stage1_pass_cases}"
+    output_name="stage1_pass"
+    ;;
+  stage2_pass|stage2_pass_cases)
+    cases="${stage2_pass_cases}"
+    output_name="stage2_pass"
+    ;;
+  stage3_pass|stage3_pass_cases)
+    cases="${stage3_pass_cases}"
+    output_name="stage3_pass"
     ;;
   dynamic_error|dynamic_error_cases)
     cases="${dynamic_error_cases}"
@@ -154,6 +165,11 @@ case "${cases_arg}" in
     done
     ;;
 esac
+
+if [[ -z "${cases}" ]]; then
+  echo "Error: no models configured for '${cases_arg}'." >&2
+  exit 2
+fi
 
 device_name="${device//,/_}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

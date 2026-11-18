@@ -1,4 +1,4 @@
-"""qnm Teukolsky quasinormal modes with DeepONet, float64 (examples/qnm/main.py, main.yaml)."""
+"""qnm Teukolsky quasinormal modes with DeepONet (examples/qnm/main.py, main.yaml)."""
 import os
 import sys
 
@@ -14,8 +14,8 @@ _EX_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "examples", 
 sys.path.insert(0, os.path.abspath(_EX_DIR))
 from model import DeepONet  # noqa: E402
 
-DTYPE = "float64"
-paddle.set_default_dtype(DTYPE)  # as examples/qnm/main.py
+DTYPE = "float32"  # Iluvatar does not provide float64 kernels used by this model
+paddle.set_default_dtype(DTYPE)
 
 EXAMPLE = "qnm"
 NOTE = (
@@ -29,6 +29,7 @@ BATCH_SIZE = A_NUM * (SV_BS + PDE_BS)
 
 
 def F_terms(a, w, A, s, m, x):
+    j = paddle.complex(paddle.zeros_like(a), paddle.ones_like(a))
     r_plus = (1 + paddle.sqrt(1 - 4 * a**2)) / 2
     F0 = (
         -(a**4) * x**2 * w**2
@@ -39,39 +40,39 @@ def F_terms(a, w, A, s, m, x):
             + x**2
             * (
                 4 * (r_plus + 1) * w**2
-                + 2j * (r_plus + 2) * w
-                + 2j * s * (w + 1j)
+                + 2 * j * (r_plus + 2) * w
+                + 2 * j * s * (w + j)
                 - 2
             )
             + x * w**2
             - w**2
         )
-        + 2 * a * m * (r_plus * x**2 * (2 * w + 1j) - x * (w + 1j) - w)
+        + 2 * a * m * (r_plus * x**2 * (2 * w + j) - x * (w + j) - w)
         + A * (x - 1)
-        - 1j
+        - j
         * r_plus
-        * (2 * w + 1j)
-        * (x**2 * (s - 2j * w + 1) - 2 * (s + 1) * x + 2j * w)
-        + (s + 1) * (x - 2j * w)
+        * (2 * w + j)
+        * (x**2 * (s - 2 * j * w + 1) - 2 * (s + 1) * x + 2 * j * w)
+        + (s + 1) * (x - 2 * j * w)
     )
     F1 = (
-        2 * a**4 * x**4 * (x - 1j * w)
-        - 2j * a**3 * m * x**4
+        2 * a**4 * x**4 * (x - j * w)
+        - 2 * j * a**3 * m * x**4
         + a**2
         * x**2
         * (
-            2 * r_plus * x**2 * (-1 + 2j * w)
+            2 * r_plus * x**2 * (-1 + 2 * j * w)
             - (s + 3) * x**2
-            + 2 * x * (s + 1j * w + 2)
-            - 4j * w
+            + 2 * x * (s + j * w + 2)
+            - 4 * j * w
         )
-        + 2j * a * m * (x - 1) * x**2
+        + 2 * j * a * m * (x - 1) * x**2
         + (x - 1)
         * (
-            2 * r_plus * x**2 * (1 - 2j * w)
+            2 * r_plus * x**2 * (1 - 2 * j * w)
             + (s + 1) * x**2
             - 2 * (s + 1) * x
-            + 2j * w
+            + 2 * j * w
         )
     )
     F2 = a**4 * x**6 - 2 * a**2 * (x - 1) * x**4 + (x - 1) ** 2 * x**2

@@ -374,7 +374,9 @@ def compute_cuboid_self_attention_mask(
     if padding_type == "ignore":
         data_mask = cuboid_reorder(data_mask, cuboid_size, strategy=strategy)
         data_mask = data_mask.squeeze(axis=-1).squeeze(axis=0)
-    shift_mask = np.zeros(shape=(1, T + pad_t, H + pad_h, W + pad_w, 1))
+    shift_mask = np.zeros(
+        shape=(1, T + pad_t, H + pad_h, W + pad_w, 1), dtype=np.float32
+    )
     cnt = 0
     for t in (
         slice(-cuboid_size[0]),
