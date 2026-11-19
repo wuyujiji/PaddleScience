@@ -3,12 +3,12 @@ set -euo pipefail
 
 stage1_pass_cases="allen_cahn,climateformer,control_arm,deepcfd,deephpms,fsi,gencast,heart,hpinns,ifm,meteoformer,ntopo,preformer,smc_reac,transformer4sr"
 stage2_pass_cases="bubble,darcy,earthformer,heat_pinn,ldc,phygeonet,pipe,xpinn"
-stage3_pass_cases="graphcast,mlp_li"
+stage3_pass_cases="graphcast,operator_learning,regae,unetformer,perovskite_solar_cells,xrdmatch"
 dynamic_error_cases=""
 cinn_error_cases=""
-acc_fail_cases="bracket,cnn_uts,epnn,heat_exchanger,kmcast,perovskite_solar_cells,qnm,shock_wave,topopt,unetformer,xrdmatch"
-train_slower_cases="operator_learning"
-infer_slower_cases="aneurysm,cylinder,nls_mb,nsfnet,regae"
+acc_fail_cases="aneurysm,bracket,cnn_uts,epnn,heat_exchanger,kmcast,nls_mb,qnm,shock_wave,topopt"
+train_slower_cases=""
+infer_slower_cases="cylinder,mlp_li,nsfnet"
 both_slower_cases="iops"
 
 all_cases="${stage1_pass_cases},${stage2_pass_cases},${stage3_pass_cases},${dynamic_error_cases},${cinn_error_cases},${acc_fail_cases},${train_slower_cases},${infer_slower_cases},${both_slower_cases}"

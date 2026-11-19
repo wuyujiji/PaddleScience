@@ -53,6 +53,12 @@ CINN_ENV = {
     "FLAGS_print_ir": "False",
 }
 STAGES = ("infer", "train")
+# Losses that converge to ~0 make a plain relative difference meaningless: both
+# runs are at fp32 noise level, yet dividing by the tiny reference inflates the
+# error to O(1). Flooring the denominator is the same as allowing an absolute
+# difference of train_step_rtol * LOSS_REL_DIFF_FLOOR. Every model we track has
+# a window loss either below 1e-8 or above 4e-4, so this value sits in the gap.
+LOSS_REL_DIFF_FLOOR = 1e-5
 
 
 def list_cases():
@@ -322,7 +328,7 @@ def last_error_line(log_path):
 
 
 def rel_diff(a, b):
-    return abs(a - b) / max(abs(a), 1e-12)
+    return abs(a - b) / max(abs(a), LOSS_REL_DIFF_FLOOR)
 
 
 def train_window_stats(ref, out, start_step, end_step, step_rtol):
@@ -359,7 +365,7 @@ def plot_train_loss_comparison(work_dir, case_name, ref, out, args):
     cinn_mean = statistics.mean(out[window])
 
     signed_rel_diffs = [
-        (cinn_loss - dynamic_loss) / max(abs(dynamic_loss), 1e-12)
+        (cinn_loss - dynamic_loss) / max(abs(dynamic_loss), LOSS_REL_DIFF_FLOOR)
         for dynamic_loss, cinn_loss in zip(ref, out)
     ]
     signed_diffs = [
