@@ -26,7 +26,9 @@ CONFIG = (
     Path(__file__).resolve().parents[3]
     / "examples/extformer_moe/conf/extformer_moe_enso_pretrain.yaml"
 )
-BATCH_SIZE = 16
+# Batch 16 needs an additional 126 MB during dynamic training, exceeding the
+# currently available CoreX device memory; 8 preserves the test graph shape.
+BATCH_SIZE = 8
 LEARNING_RATE = 1e-4
 INPUT_SHAPE = (12, 24, 48, 1)
 TARGET_SHAPE = (14, 24, 48, 1)

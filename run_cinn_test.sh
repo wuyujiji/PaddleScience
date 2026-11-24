@@ -4,14 +4,16 @@ set -euo pipefail
 stage1_pass_cases="allen_cahn,climateformer,control_arm,deepcfd,deephpms,fsi,gencast,heart,hpinns,ifm,meteoformer,ntopo,preformer,smc_reac,transformer4sr"
 stage2_pass_cases="bubble,darcy,earthformer,heat_pinn,ldc,phygeonet,pipe,xpinn"
 stage3_pass_cases="graphcast,operator_learning,regae,unetformer,perovskite_solar_cells,xrdmatch"
+stage4_pass_cases="extformer_moe"
 dynamic_error_cases=""
-cinn_error_cases=""
-acc_fail_cases="aneurysm,bracket,cnn_uts,epnn,heat_exchanger,kmcast,nls_mb,qnm,shock_wave,topopt"
+# has the same cinn error on A100
+cinn_error_cases="fourcastnet,utae"
+acc_fail_cases="aneurysm,bracket,cnn_uts,epnn,heat_exchanger,kmcast,nls_mb,qnm,shock_wave,topopt,velocitygan"
 train_slower_cases=""
 infer_slower_cases="cylinder,mlp_li,nsfnet"
 both_slower_cases="iops"
 
-all_cases="${stage1_pass_cases},${stage2_pass_cases},${stage3_pass_cases},${dynamic_error_cases},${cinn_error_cases},${acc_fail_cases},${train_slower_cases},${infer_slower_cases},${both_slower_cases}"
+all_cases="${stage1_pass_cases},${stage2_pass_cases},${stage3_pass_cases},${stage4_pass_cases},${dynamic_error_cases},${cinn_error_cases},${acc_fail_cases},${train_slower_cases},${infer_slower_cases},${both_slower_cases}"
 
 cases_arg="stage1_pass"
 warmup=5
@@ -25,8 +27,8 @@ Usage: bash run_cinn_test.sh [options]
 
 Options:
   --cases CASES    Model name, comma-separated model names, or one of:
-                   stage1_pass, stage2_pass, stage3_pass, dynamic_error, cinn_error, acc_fail,
-                   train_slower, infer_slower, both_slower
+                   stage1_pass, stage2_pass, stage3_pass, stage4_pass, dynamic_error,
+                   cinn_error, acc_fail, train_slower, infer_slower, both_slower
                    (default: stage1_pass)
   --warmup N       Warmup iterations (default: 5)
   --iters N        Timed iterations (default: 495)
@@ -128,6 +130,10 @@ case "${cases_arg}" in
   stage3_pass|stage3_pass_cases)
     cases="${stage3_pass_cases}"
     output_name="stage3_pass"
+    ;;
+  stage4_pass|stage4_pass_cases)
+    cases="${stage4_pass_cases}"
+    output_name="stage4_pass"
     ;;
   dynamic_error|dynamic_error_cases)
     cases="${dynamic_error_cases}"
