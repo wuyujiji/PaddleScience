@@ -139,7 +139,9 @@ def compute_cuboid_cross_attention_mask(
     )
     mem_mask = mem_mask.squeeze(axis=-1).squeeze(axis=0)
     _, mem_cuboid_volume = mem_mask.shape
-    shift_mask = np.zeros(shape=(1, n_temporal, H + pad_h, W + pad_w, 1))
+    shift_mask = np.zeros(
+        shape=(1, n_temporal, H + pad_h, W + pad_w, 1), dtype=np.float32
+    )
     cnt = 0
     for h in (
         slice(-cuboid_hw[0]),

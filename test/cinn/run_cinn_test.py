@@ -163,6 +163,15 @@ def worker(case_name, mode, stages, iters, warmup, work_dir, reuse_inputs=False)
     work_dir instead of regenerating them, e.g. files copied from another machine."""
     import paddle
 
+    if mode == "cinn" and paddle.is_compiled_with_custom_device("iluvatar_gpu"):
+        # PirInterpreter waits for the device after every run on a custom place,
+        # which keeps the host from queuing the next step while the current one
+        # is still running. Dynamic mode has no such barrier, so leaving it on
+        # would charge the static graph for a serialisation the baseline never
+        # pays. Nothing here copies results into host memory, the case where
+        # the wait is load-bearing.
+        paddle.set_flags({"FLAGS_custom_device_pir_interpreter_sync": False})
+
     case = importlib.import_module(f"cases.{case_name}")
 
     class InferNet(paddle.nn.Layer):
