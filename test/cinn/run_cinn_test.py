@@ -356,17 +356,108 @@ def compare_infer(work_dir):
         if set(ref.files) != set(out.files):
             return {"error": f"output keys differ: {ref.files} vs {out.files}"}
         worst_abs, worst_rel = 0.0, 0.0
+        dynamic_sum, cinn_sum, output_size = 0.0, 0.0, 0
         for key in ref.files:
             a, b = ref[key].astype("float64"), out[key].astype("float64")
             if a.shape != b.shape:
                 return {"error": f"{key} shape {a.shape} vs {b.shape}"}
             if not np.isfinite(b).all() and np.isfinite(a).all():
                 return {"error": f"{key} has non-finite values under CINN"}
+            dynamic_sum += float(a.sum())
+            cinn_sum += float(b.sum())
+            output_size += a.size
             diff = float(np.nanmax(np.abs(a - b))) if a.size else 0.0
             scale = float(np.nanmax(np.abs(a))) if a.size else 0.0
             worst_abs = max(worst_abs, diff)
             worst_rel = max(worst_rel, diff / max(scale, 1e-12))
-    return {"max_abs_diff": worst_abs, "max_rel_diff": worst_rel}
+    return {
+        "max_abs_diff": worst_abs,
+        "max_rel_diff": worst_rel,
+        "dynamic_final_output_mean": dynamic_sum / output_size if output_size else None,
+        "cinn_final_output_mean": cinn_sum / output_size if output_size else None,
+    }
+
+
+def record_infer_means(work_dir, infer):
+    """Add final inference means to the dynamic and CINN worker results."""
+    for mode, mean in (
+        ("dynamic", infer.get("dynamic_final_output_mean")),
+        ("cinn", infer.get("cinn_final_output_mean")),
+    ):
+        if mean is None:
+            continue
+        log_path = work_dir / f"{mode}.log"
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            if line.startswith(RESULT_PREFIX):
+                result = json.loads(line[len(RESULT_PREFIX) :])
+                result["infer"]["final_output_mean"] = mean
+                lines[index] = RESULT_PREFIX + json.dumps(result)
+                break
+        else:
+            raise ValueError(f"worker result missing from {log_path}")
+        log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def plot_train_loss_comparison(work_dir, case_name, ref, out, args):
+    """Save loss and error curves for all steps and the acceptance window."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    ref = np.asarray(ref, dtype="float64")
+    out = np.asarray(out, dtype="float64")
+    steps = np.arange(1, len(ref) + 1)
+    lo, hi = args.window
+    window = slice(lo - 1, hi)
+    window_steps = steps[window]
+    signed_metric_diffs = np.asarray(
+        [
+            (b - a) / max(abs(a), 1e-12) if abs(a) > 1.0 else b - a
+            for a, b in zip(ref, out)
+        ]
+    )
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.2), constrained_layout=True)
+    axes = axes.flat
+    axes[0].plot(steps, ref, label="Dynamic graph", linewidth=1.2)
+    axes[0].plot(steps, out, label="to_static + CINN", linewidth=1.2)
+    axes[0].set_title("Loss, all training steps")
+    axes[0].set_xlabel("Training step")
+    axes[0].set_ylabel("Loss")
+    axes[0].grid(alpha=0.25)
+    axes[0].legend()
+
+    axes[1].plot(window_steps, ref[window], label="Dynamic graph", linewidth=1.2)
+    axes[1].plot(window_steps, out[window], label="to_static + CINN", linewidth=1.2)
+    axes[1].set_title(f"Loss, steps {lo}-{hi}")
+    axes[1].set_xlabel("Training step")
+    axes[1].set_ylabel("Loss")
+    axes[1].grid(alpha=0.25)
+    axes[1].legend()
+
+    axes[2].plot(
+        window_steps,
+        signed_metric_diffs[window],
+        label="Signed hybrid loss diff",
+        linewidth=1.2,
+    )
+    for threshold in (args.train_tol, -args.train_tol):
+        axes[2].axhline(threshold, color="tab:red", linestyle="--")
+    axes[2].set_title("Signed acceptance metric")
+    axes[2].set_xlabel("Training step")
+    axes[2].set_ylabel("Relative if |loss| > 1, otherwise absolute")
+    axes[2].set_yscale("symlog", linthresh=args.train_tol)
+    axes[2].grid(alpha=0.25)
+    axes[2].legend()
+
+    fig.suptitle(
+        f"{case_name}: window mean loss "
+        f"{statistics.mean(ref[window]):.6g} / {statistics.mean(out[window]):.6g}"
+    )
+    fig.savefig(work_dir / "train_loss_comparison.png", dpi=160)
+    plt.close(fig)
 
 
 def compare_case(dynamic, cinn, work_dir, args):
@@ -391,6 +482,8 @@ def compare_case(dynamic, cinn, work_dir, args):
         finite = all(np.isfinite(out)) or not all(np.isfinite(ref))
         report["train"] = {
             "window": [lo, min(hi, len(diffs))],
+            "dynamic_mean_loss": statistics.mean(ref[window]),
+            "cinn_mean_loss": statistics.mean(out[window]),
             "window_max_diff": max(w_diffs),
             "window_mean_diff": float(np.mean(w_diffs)),
             "outliers": len(outliers),
@@ -411,6 +504,15 @@ def compare_case(dynamic, cinn, work_dir, args):
                 "speedup": speedup,
             }
         )
+        if stage == "train":
+            report[stage].update(
+                {
+                    "dynamic_fps": dynamic["batch_size"]
+                    / dynamic[stage]["steady_mean_seconds"],
+                    "cinn_fps": cinn["batch_size"]
+                    / cinn[stage]["steady_mean_seconds"],
+                }
+            )
     return report
 
 
@@ -429,6 +531,19 @@ def run_case(case_name, args, devices, out_dir):
             summary.update(status="CINN_ERROR", error=error)
             return summary
         summary.update(compare_case(dynamic, cinn, work_dir, args))
+        if "infer" in args.stages:
+            record_infer_means(work_dir, summary["infer"])
+        if "train" in args.stages:
+            try:
+                plot_train_loss_comparison(
+                    work_dir,
+                    case_name,
+                    dynamic["train"]["losses"],
+                    cinn["train"]["losses"],
+                    args,
+                )
+            except Exception as exc:
+                summary["plot_error"] = f"{type(exc).__name__}: {exc}"
         stages = [summary[s] for s in args.stages]
         if not all(s["pass"] for s in stages):
             summary["status"] = "ACC_FAIL"
@@ -445,14 +560,29 @@ def run_case(case_name, args, devices, out_dir):
 def fmt_stage(summary, stage):
     s = summary.get(stage)
     if not s:
-        return ["-", "-", "-"]
+        return ["-"] * (5 if stage == "train" else 4)
     if stage == "infer":
         acc = s.get("error") or f"{s['max_rel_diff']:.1e}"
+        before_acc = [
+            (
+                "-"
+                if s.get("dynamic_final_output_mean") is None
+                else f"{s['dynamic_final_output_mean']:.8g}/"
+                f"{s['cinn_final_output_mean']:.8g}"
+            )
+        ]
+        fps = []
     else:
+        before_acc = [
+            f"{s['dynamic_mean_loss']:.8g}/{s['cinn_mean_loss']:.8g}"
+        ]
         acc = f"{s['window_max_diff']:.1e} ({s['outliers']})"
+        fps = [f"{s['dynamic_fps']:.2f}/{s['cinn_fps']:.2f}"]
     return [
+        *before_acc,
         acc,
         f"{s['dynamic_seconds'] * 1e3:.2f}/{s['cinn_seconds'] * 1e3:.2f}",
+        *fps,
         f"{s['speedup']:.2f}x",
     ]
 
@@ -462,10 +592,20 @@ def write_summary(summaries, out_dir, args):
     for stage in args.stages:
         if stage == "infer":
             acc = "infer rel diff"
+            before_acc = ["infer final output mean dyn/cinn"]
+            fps = []
         else:
             lo, hi = args.window
+            before_acc = [f"train loss mean {lo}-{hi} dyn/cinn"]
             acc = f"train diff {lo}-{hi} max (outliers)"
-        header += [acc, f"{stage} ms dyn/cinn", f"{stage} speedup"]
+            fps = ["train FPS dyn/cinn"]
+        header += [
+            *before_acc,
+            acc,
+            f"{stage} ms dyn/cinn",
+            *fps,
+            f"{stage} speedup",
+        ]
     rows = []
     for s in sorted(summaries, key=lambda x: x["case"]):
         row = [s["case"], s["status"]]
