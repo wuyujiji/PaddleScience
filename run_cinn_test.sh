@@ -4,17 +4,25 @@ set -euo pipefail
 stage1_pass_cases="allen_cahn,climateformer,control_arm,deepcfd,deephpms,fsi,gencast,heart,hpinns,ifm,meteoformer,ntopo,preformer,smc_reac,transformer4sr"
 stage2_pass_cases="bubble,darcy,earthformer,heat_pinn,ldc,phygeonet,pipe,xpinn"
 stage3_pass_cases="graphcast,operator_learning,regae,unetformer,perovskite_solar_cells,xrdmatch"
-stage4_pass_cases="extformer_moe"
-dynamic_error_cases=""
-# has the same cinn error on A100
-cinn_error_cases="fourcastnet,utae"
-acc_fail_cases="aneurysm,bracket,cnn_uts,epnn,heat_exchanger,kmcast,nls_mb,qnm,shock_wave,topopt,velocitygan"
+stage4_pass_cases="kmcast,nls_mb,topopt"
+stage5_pass_cases="extformer_moe"
+stage6_pass_cases="gpinn,ide,laplace,quick_start"
+# Collect every stageN_pass_cases group, so adding a new stage needs no change here.
+all_passed_cases=""
+while IFS= read -r stage_var; do
+  [[ -n "${all_passed_cases}" ]] && all_passed_cases+=","
+  all_passed_cases+="${!stage_var}"
+done < <(compgen -A variable | grep -E '^stage[0-9]+_pass_cases$' | sort -V)
+dynamic_error_cases="fpde,phylstm,tempogan"
+# has the same cinn error on A100 (fourcastnet,utae)
+cinn_error_cases="fourcastnet,utae,biharmonic2d,euler_beam,lorenz,phycrnet,rossler,spinn,tgcn,wgangp"
+acc_fail_cases="aneurysm,bracket,cnn_uts,epnn,heat_exchanger,qnm,shock_wave,velocitygan,chip_heat"
 train_slower_cases=""
 infer_slower_cases="cylinder,mlp_li,nsfnet,iops"
-both_slower_cases=""
-new_cases="biharmonic2d,chip_heat,euler_beam,fpde,gpinn,ide,laplace,lorenz,phycrnet,phylstm,quick_start,rossler,spinn,tadf,tempogan,tgcn,wgangp"
+both_slower_cases="tadf"
+new_cases=""
 
-all_cases="${stage1_pass_cases},${stage2_pass_cases},${stage3_pass_cases},${stage4_pass_cases},${dynamic_error_cases},${cinn_error_cases},${acc_fail_cases},${train_slower_cases},${infer_slower_cases},${both_slower_cases},${new_cases}"
+all_cases="${all_passed_cases},${dynamic_error_cases},${cinn_error_cases},${acc_fail_cases},${train_slower_cases},${infer_slower_cases},${both_slower_cases},${new_cases}"
 
 cases_arg="stage1_pass"
 warmup=5
@@ -28,8 +36,8 @@ Usage: bash run_cinn_test.sh [options]
 
 Options:
   --cases CASES    Model name, comma-separated model names, or one of:
-                   stage1_pass, stage2_pass, stage3_pass, stage4_pass, dynamic_error,
-                   cinn_error, acc_fail, train_slower, infer_slower, both_slower, new
+                   stageN_pass (e.g. stage1_pass ... stage6_pass), dynamic_error,
+                   all_passed, cinn_error, acc_fail, train_slower, infer_slower, both_slower, new
                    (default: stage1_pass)
   --warmup N       Warmup iterations (default: 5)
   --iters N        Timed iterations (default: 495)
@@ -120,21 +128,22 @@ fi
 cases_arg="${cases_arg//，/,}"
 cases_arg="${cases_arg// /}"
 case "${cases_arg}" in
-  stage1_pass|stage1_pass_cases)
-    cases="${stage1_pass_cases}"
-    output_name="stage1_pass"
+  stage[0-9]*_pass|stage[0-9]*_pass_cases)
+    if [[ "${cases_arg}" == *_cases ]]; then
+      stage_var="${cases_arg}"
+    else
+      stage_var="${cases_arg}_cases"
+    fi
+    if ! declare -p "${stage_var}" &>/dev/null; then
+      echo "Error: unknown stage group '${cases_arg}'." >&2
+      exit 2
+    fi
+    cases="${!stage_var}"
+    output_name="${stage_var%_cases}"
     ;;
-  stage2_pass|stage2_pass_cases)
-    cases="${stage2_pass_cases}"
-    output_name="stage2_pass"
-    ;;
-  stage3_pass|stage3_pass_cases)
-    cases="${stage3_pass_cases}"
-    output_name="stage3_pass"
-    ;;
-  stage4_pass|stage4_pass_cases)
-    cases="${stage4_pass_cases}"
-    output_name="stage4_pass"
+  all_passed|all_passed_cases)
+    cases="${all_passed_cases}"
+    output_name="all_passed"
     ;;
   dynamic_error|dynamic_error_cases)
     cases="${dynamic_error_cases}"
